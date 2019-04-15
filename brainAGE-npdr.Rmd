@@ -1,0 +1,665 @@
+---
+title: "BrainAge with SVR and prediction on subjects in the Ibuprofen study"
+output: html_document
+author: Trang Le
+---
+```{r}
+# rm(list = ls())
+```
+
+```{r}
+check.packages <- function(pkg){
+  # check.packages function: install and load multiple R packages.
+  # Check to see if packages are installed. Install them if they are not, 
+  # then load them into the R session.
+  # https://gist.github.com/smithdanielle/9913897
+  
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+check.packages(c("ggplot2", "dplyr", "e1071", "reshape2", "beepr", "ggthemes", "gridExtra",
+               "caret", "kernlab", "anytime"))
+```
+
+```{r setup, include=FALSE}
+
+
+# suppressPackageStartupMessages(library(CORElearn))
+# suppressPackageStartupMessages(library(randomForest))
+# library(ggplot2)
+# library(dplyr) # data manipulation
+library(broom)
+# devtools::install_github("insilico/npdr")
+library(npdr)
+
+library(e1071) # SVM
+library(reshape2) # data manipulation
+library(beepr) # beep
+library('ggthemes') # visualisation
+library(gridExtra) # visualisation
+library(caret) # tune
+# library(kernlab)
+# install.packages("anytime")
+library(anytime)
+# library(xgboost) # machine learning method
+# suppressPackageStartupMessages(library(CORElearn)) # machine learning method
+# suppressPackageStartupMessages(library(randomForest)) # machine learning method
+# library(GPFDA) # Gaussian Process Regression
+# library(randomForest)
+```
+
+Load and prep data:
+
+```{r}
+today <- Sys.Date()
+load('idpsAllScans.Rdata')
+class(idps) <- 'data.frame'
+
+demographic.data <- read.csv(paste0(getwd(), "/hanli/Basic_information.csv"), stringsAsFactors = F, na.strings=c("","NA"))
+diagnoses <- read.csv(paste0(getwd(), "/hanli/Primary_diagnosis.csv"), stringsAsFactors = F, na.strings=c("","NA"))
+behavioral_T500 <- read.csv("T1000_redcap_wide-2017-03-18.csv", stringsAsFactors = F)
+bmi <- read.csv(paste0(getwd(), "/hanli/BMI.csv"), stringsAsFactors = F, na.strings=c("","NA"))
+edu <- read.csv(paste0(getwd(), "/hanli/Education.csv"), stringsAsFactors = F, na.strings=c("","NA"))
+colnames(edu)[1] <- "id"
+income <- read.csv(paste0(getwd(), "/hanli/Income.csv"), stringsAsFactors = F, na.strings=c("","NA"))
+colnames(income)[1] <- "id"
+```
+
+```{r}
+t500.subjs <- unique(behavioral_T500$id)
+t500.healthy <- behavioral_T500[behavioral_T500$GroupAssignment == "Healthy Control", "id"]
+t500.healthy <- t500.healthy[!is.na(t500.healthy)]
+rownames(idps) <- paste(idps$id, idps$visit, sep = "_")
+dim(idps)
+myidps <- idps
+navalues <- is.na(myidps)
+myidps <- myidps[rowSums(navalues) < 3000,] # remove rows with many NAs
+dim(myidps)
+# system.time(save(myidps, file = "ReducedIdps.Rdata"))
+```
+
+
+<!-- Filtering out VBMs with low variance: -->
+
+<!-- ```{r, fig.height = 7, fig.width=5} -->
+<!-- coarse.vol <- select(myidps, 1:2, starts_with("srage_freesurfer_coarsevbm_")) -->
+
+<!-- dataMatrix <- coarse.vol[, -(1:2)] -->
+<!-- sum(is.na(dataMatrix)) -->
+<!-- variances <- apply(as.matrix(dataMatrix), 2, var, na.rm = T) -->
+<!-- percentile <- 0.1 # remove columns with the lowest 10% variance -->
+<!-- threshold <- quantile(variances, c(percentile)) -->
+<!-- mask <- apply(dataMatrix, 2, function(x) var(x, na.rm = T) > threshold) -->
+<!-- coarse.vol.filtered <- coarse.vol[, c(TRUE, TRUE, mask)] # include both visit and id as well -->
+<!-- dim(coarse.vol) -->
+<!-- dim(coarse.vol.filtered) -->
+<!-- new.variances <- apply(as.matrix(coarse.vol.filtered[, -(1:2)]), 2, var) -->
+<!-- boxplot(variances, new.variances) -->
+
+<!-- my.variables <- colnames(coarse.vol.filtered[, -(1:2)]) -->
+<!-- coarse.vol <- coarse.vol.filtered -->
+<!-- all.my.variables <- c("id", "visit", my.variables) -->
+<!-- myidps <- myidps[ , all.my.variables] -->
+<!-- write.csv(my.variables, file = "filteredPredictors.csv") -->
+<!-- # coarse.vol.filtered <- fa.vbm -->
+<!-- ``` -->
+
+
+
+```{r}
+scanDates <- merge(idps[, c("id", "visit")], 
+                   demographic.data[,c("subject_id", "DOB")],
+                   by.y = "subject_id", by.x = "id")
+scanDates$visitDate <- anydate(as.numeric(scanDates$visit))
+# scanDates[is.na(scanDates$visitDate),]
+scanDates$DOB <- as.Date(scanDates$DOB, format = "%m/%d/%Y")
+scanDates$age <- (scanDates$visitDate - scanDates$DOB)/365
+write.csv(scanDates, file = "ages6000.csv")
+
+non.na.cols <- colSums(navalues) < nrow(myidps)
+idps.onescan <- myidps[!duplicated(myidps$id),]
+idps.onescan[idps.onescan$id == "AA418", ] <- idps["AA418_1308301256", ]
+rownames(idps.onescan)[idps.onescan$id == "AA418"]<- "AA418_1308301256"
+idps.onescan[idps.onescan$id == "AA088", ] <- idps["AA088_1291991462", ]
+rownames(idps.onescan)[idps.onescan$id == "AA088"]<- "AA088_1291991462"
+
+subjOneAge <- merge(idps.onescan[,1:2], scanDates, by = c("id", "visit"))
+subjOneAge$age <- as.numeric(subjOneAge$age)
+
+fa.vbm <- dplyr::select(idps.onescan, 1:2, starts_with("srage_freesurfer_coarsevbm_"))
+colnames(demographic.data)[1] <- "id"
+clean.behavorial.data <- demographic.data[!is.na(demographic.data$DOB),]
+# dob.vec <- as.Date(clean.behavorial.data$DOB, format = "%m/%d/%Y")
+# clean.behavorial.data$age <- as.numeric((today - dob.vec)/365)
+clean.behavorial.data <- merge(clean.behavorial.data, subjOneAge[, c("id", "age")], by = "id")
+# hist(clean.behavorial.data$age)
+# how many missing gender?
+myAge <- clean.behavorial.data[,c("id", "age")]
+myAge <- myAge[complete.cases(myAge),]
+rownames(myAge) <- myAge$id
+
+
+  
+combined_data <- merge(clean.behavorial.data, fa.vbm, by = 'id')
+rownames(combined_data) <- combined_data$id
+
+idps.age <- merge(myAge, fa.vbm, by = 'id')
+rownames(idps.age) <- idps.age$id
+idps.age <- idps.age %>% dplyr::select(-c(id, visit))
+
+# scanDates <- idps[, c("id", "visit")]
+# visits <- as.numeric(scanDates$visit)
+# subjs <- unique(idps$id)
+# all.scans.ids <- table(scanDates$id)
+# length(all.scans.ids)
+# multiple.scan.subjs <- names(all.scans.ids)[all.scans.ids > 1] # 1619 subjects have more than 1 scan
+```
+
+
+
+
+Load R01 data:
+
+```{r}
+# ibu.df <- read.csv(paste0(getwd(), "/hanli/ibu_visits.csv"), stringsAsFactors = F, na.strings=c("","NA"))
+# ibu.subjs <- unique(ibu.df$id)
+# ibu.visits <- as.character(unique(ibu.df$visit))
+# dob.df <- demographic.data[, c("id", "DOB")]
+# rownames(dob.df) <- dob.df$id
+# # colnames(dob.df)[1] <- "id"
+# dob.ibu <- dob.df[ibu.subjs,]
+# dob.ibu$DOB <- as.Date(dob.ibu$DOB, format = "%m/%d/%Y")
+# ibu.df$date <- as.Date(ibu.df$date, format = "%m/%d/%Y")
+# ibu.df <- mutate(ibu.df, normalized.mpparg = biodata_pparg_deltact_avg/biodata_cd14_deltact_avg)
+# ibu.merged <- merge(ibu.df, dob.ibu, by = "id")
+# ibu.merged <- mutate(ibu.merged, ageAtScan = as.numeric((date - DOB)/365))
+# drug: A is placebo, B is 200mg, C is 600mg.
+load('idpsR01.Rdata')
+
+```
+
+
+
+## Training model on 475 healthy controls (1 scan/subject). With tuning.
+
+```{r echo = F}
+## ----setup, include=FALSE------------------------------------------------
+#####################################################
+#####
+# Just healthy subjects:
+#####
+#####################################################
+
+XX <- dplyr::select(myidps, 1:2, starts_with("srage_freesurfer_coarsevbm_"))
+X <- dplyr::select(combined_data, 1, starts_with("srage_freesurfer_coarsevbm_"))
+Y <- combined_data[,c("id", "age"), drop = F] # careful with this, check rownames
+healthy <- diagnoses[diagnoses$primary_diag <= 2, "record_id"] # Healthy Control,  including high risk
+setdiff(t500.healthy, healthy)
+subjsR01 <- rownames(idpsR01)
+# t500.healthy <- intersect(healthy, t500.subjs)
+cat("Total number of healthy subjects: ", length(unique(healthy)), '\n')
+# cat("Number of T1000 healthy subjects excluded: ", length(intersect(healthy, t500.healthy)), '\n')
+cat("Number of R01 healthy subjects excluded: ", length(intersect(healthy, subjsR01)), '\n')
+# Exclude subjects from the ibuprofen and T1000 study:
+healthy <- base::setdiff(healthy, subjsR01)
+# healthy <- base::setdiff(healthy, t500.healthy)
+# t500.healthy.scanned <- intersect(t500.healthy, X$id)
+# save(t500.healthy.scanned, file ='T500HealthySubjectsScanned.Rdata')
+
+
+healthy.scanned <- intersect(healthy, X$id)
+cat("Number of healthy subjects in the training set: ", length(healthy.scanned))
+behavioral.train <- demographic.data[demographic.data$id %in% healthy.scanned, ]
+sum(behavioral.train$Gender == 2)
+X.healthy <- X[healthy.scanned, ]
+Y.healthy <- Y[healthy.scanned, ] # careful with this, check rownames
+ptm <- proc.time()
+nfolds <- 10
+all_predictions <- NULL
+X.noid <- X.healthy[,-1]
+Y.noid <- Y.healthy[,-1, drop = F]
+fold_size <- nrow(Y.noid) %/% nfolds
+
+# ibu.scanned <- intersect(ibu.subjs, XX$id)
+# ibu.visits <- gsub(" ", "", ibu.visits)
+# X.ibu <- XX[XX$visit %in% ibu.visits, -(1:2)]
+X.R01 <- idpsR01
+```
+
+
+
+Filtering out VBMs with low variance:
+
+```{r, fig.height = 7, fig.width=5}
+# coarse.vol <- select(myidps, 1:2, starts_with("srage_freesurfer_coarsevbm_"))
+# coarse.vol <- rbind(X.noid, X.ibu)
+coarse.vol <- X.noid
+dataMatrix <- coarse.vol[, -(1:2)]
+# sum(is.na(dataMatrix))
+variances <- apply(as.matrix(dataMatrix), 2, var, na.rm = T)
+percentile <- 0.1 # remove columns with the lowest 10% variance
+threshold <- quantile(variances, c(percentile))
+mask <- apply(dataMatrix, 2, function(x) var(x, na.rm = T) > threshold)
+coarse.vol.filtered <- coarse.vol[, c(TRUE, TRUE, mask)] # include both visit and id as well
+dim(coarse.vol)
+dim(coarse.vol.filtered)
+new.variances <- apply(as.matrix(coarse.vol.filtered[, -(1:2)]), 2, var)
+# pdf("figS1.pdf", width = 5, height = 7)
+boxplot(variances, new.variances)
+# dev.off()
+
+par(mfrow = c(2,1))
+hist(variances)
+hist(new.variances)
+par(mfrow = c(1,1))
+
+my.variables <- colnames(coarse.vol.filtered[, -(1:2)])
+coarse.vol <- coarse.vol.filtered
+all.my.variables <- c("id", "visit", my.variables)
+myidps <- myidps[ , all.my.variables]
+write.csv(my.variables, file = "filteredPredictors.csv")
+# coarse.vol.filtered <- fa.vbm
+```
+
+
+Reset X.healthy, Y.healthy, etc.
+
+```{r}
+combined_data <- merge(clean.behavorial.data, fa.vbm[, all.my.variables], by = 'id')
+rownames(combined_data) <- combined_data$id
+
+X <- dplyr::select(combined_data, 1, starts_with("srage_freesurfer_coarsevbm_"))
+Y <- combined_data[,c("id", "age"), drop = F] # careful with this, check rownames
+# healthy <- diagnoses[diagnoses$primary_diag <= 2, "record_id"] # Healthy Control,  including high risk
+# setdiff(t500.healthy, healthy)
+# # t500.healthy <- intersect(healthy, t500.subjs)
+# cat("Total number of healthy subjects: ", length(unique(healthy)), '\n')
+# cat("Number of T1000 healthy subjects excluded: ", length(intersect(healthy, t500.healthy)), '\n')
+# cat("Number of IBU healthy subjects excluded: ", length(intersect(healthy, ibu.subjs)), '\n')
+# # Exclude subjects from the ibuprofen and T1000 study:
+# healthy <- base::setdiff(healthy, ibu.subjs)
+# healthy <- base::setdiff(healthy, t500.healthy)
+# t500.healthy.scanned <- intersect(t500.healthy, X$id)
+# save(t500.healthy.scanned, file ='T500HealthySubjectsScanned.Rdata')
+
+
+# healthy.scanned <- intersect(healthy, X$id)
+# cat("Number of healthy subjects in the training set: ", length(healthy.scanned))
+# behavioral.train <- demographic.data[demographic.data$id %in% healthy.scanned, ]
+# sum(behavioral.train$Gender == 2)
+X.healthy <- X[healthy.scanned, ]
+Y.healthy <- Y[healthy.scanned, ] # careful with this, check rownames
+ptm <- proc.time()
+nfolds <- 10
+
+X.noid <- X.healthy[,-1]
+Y.noid <- Y.healthy[,-1, drop = F]
+fold_size <- nrow(Y.noid) %/% nfolds
+
+```
+
+
+
+
+```{r}
+##### Run glmSTIR
+mySex <- clean.behavorial.data[,c("id", 'Gender')]
+
+healthy.dat <- merge(X.healthy, Y.healthy, by = "id") %>% 
+  merge(mySex, by = "id") %>% dplyr::select(-id)
+
+npdr.qtrait.results <- npdr(
+  "age", dplyr::select(healthy.dat, - Gender), 
+  regression.type="lm", attr.diff.type="numeric-abs", 
+  dopar.reg = T, fast.reg = T, nbd.method="multisurf", verbose = T,
+  # covars = dplyr::select(healthy.dat, Gender), covar.diff.type = "match-mismatch",
+  nbd.metric = "manhattan", msurf.sd.frac=.5, padj.method ="bonferroni")
+
+```
+
+
+
+Univariate regressions:
+```{r}
+vbm_age <- uniReg(
+  outcome = 'age', 
+  dataset = dplyr::select(healthy.dat, - Gender),
+  regression.type = 'lm',
+  padj.method = 'bonferroni')
+
+hist(vbm_age[,4])
+hist(vbm_age[,3])
+sum(vbm_age[,3]<0.05)
+uni_feats <- rownames(vbm_age)[vbm_age[,4]<0.05]
+npdr_feats <- npdr.qtrait.results[npdr.qtrait.results[,'pval.adj']<0.05, 'att']
+length(base::intersect(uni_feats, npdr_feats))
+length(setdiff(npdr_feats, uni_feats))
+length(setdiff(uni_feats, npdr_feats))
+
+
+str(uni_feats)
+
+nrow(vbm_age)
+rownames(vbm_age)[1]
+```
+
+
+```{r}
+cor_vec <- vector(mode = 'numeric', length = nrow(npdr.qtrait.results))
+i <- 0
+for (voxel in setdiff(npdr.qtrait.results$att, 'age')){
+  i <- i + 1
+  cor_vec[i] <- cor(healthy.dat[, voxel], healthy.dat$age)
+}
+npdr.qtrait.results$cor <- cor_vec
+```
+
+
+```{r}
+group_text <- data.frame(
+  label = c('NPDR-selected', 'Not NPDR-selected'), 
+  important = c(T, F),
+  x = c(-0.4, 0), y = c(112, 210))
+
+npdr.qtrait.results %>%
+  mutate(important = pval.adj < 0.05) %>%
+  dplyr::select(cor, important) %>%
+  ggplot(aes(x = cor, fill = important)) +
+  geom_histogram(alpha = 0.5, position = 'identity') +
+  theme_bw() +
+  labs(x = 'Correlation of voxel\'s gray matter density and age', y = NULL) + 
+  geom_text(aes(x = x, y = y, label = label, color = important), 
+            group_text, 
+            size = 5) +
+  scale_fill_brewer(palette = 'Dark2') +
+  scale_color_brewer(palette = 'Dark2') +
+  guides(fill = F, color = F)
+```
+
+
+
+
+```{r}
+n_voxels <- 6
+mycolors <- c('#d7191c', '#fdae61', '#ffffbf', '#abd9e9', '#2c7bb6')
+# plot( healthy.dat$age, healthy.dat$srage_freesurfer_coarsevbm_4_n30_38)
+healthy.dat.plot <- healthy.dat[, c('age', npdr_feats[1:n_voxels])] %>%
+  gather('volume', 'density', 2:(n_voxels+1)) %>%
+  mutate(newvolume = gsub('srage_freesurfer_coarsevbm_', '', volume))
+healthy.dat.plot$newvolume <- as.factor(healthy.dat.plot$newvolume)
+levels(healthy.dat.plot$newvolume) <- paste('Voxel', 1:n_voxels)
+p <- ggplot(healthy.dat.plot, aes(x = age, y = density)) +
+  geom_point(alpha = 0.2, stroke = 0) + geom_smooth(color = mycolors[5]) + theme_bw() +
+  facet_wrap(. ~ newvolume) +
+  scale_y_continuous(breaks = scales::pretty_breaks(4)) +
+  scale_x_continuous(breaks = c(25, 40, 55)) +
+  labs(y = 'Gray matter density of coarse voxel', x = 'Age') +
+  theme(strip.background = element_rect(fill="#fcfce6"),
+        panel.spacing.x = unit(0, "lines"),
+        strip.text = element_text(size = rel(0.7), margin = margin(0.5,0,0.5,0, "mm")))
+p
+ggsave(p, filename = 'VBMvsAge.pdf', height = 3, width = 3)
+```
+
+```{r}
+library(ggplot2)
+library(grid)
+p <- ggplot() +
+  geom_bar(data = mtcars, aes(x = cyl, y = qsec), stat = 'identity') +
+  facet_wrap( ~ carb, ncol = 3)
+
+mytheme <- theme_minimal() + theme(
+  axis.text.x = element_blank(),
+  axis.text.y = element_blank(),
+  axis.ticks = element_blank(),
+  axis.title = element_blank(),
+  panel.margin = unit(0, "lines"),
+  panel.border = element_rect(colour = rgb(1.0, 0, 0, 0.5), fill=NA, size=1)
+)
+p + mytheme + theme(strip.text = element_blank())
+p + mytheme +
+     theme(strip.text = element_text(size = rel(2.0), vjust = -4.0))
+```
+
+
+
+
+
+```{r}
+mycolors <- c('#d7191c', '#fdae61', '#ffffbf', '#abd9e9', '#2c7bb6')
+plot(healthy.dat$srage_freesurfer_coarsevbm_4_n30_38, healthy.dat$age)
+healthy.dat.plot <- healthy.dat[, c('age', tail(npdr_feats, 9))] %>%
+  gather('volume', 'density', 2:10) %>%
+  mutate(newvolume = gsub('srage_freesurfer_coarsevbm_', '', volume))
+p <- ggplot(healthy.dat.plot, aes(x = age, y = density)) +
+  geom_point(alpha = 0.2) + geom_smooth(color = mycolors[5]) + theme_bw() +
+  facet_wrap(~ newvolume, scale = 'free_y') +
+  scale_y_continuous(breaks = seq(0.2, 0.8, 0.2)) +
+  scale_x_continuous(breaks = seq(20, 60, 20)) +
+  labs(y = 'Gray matter density of coarse voxel', x = 'Age')
+p
+ggsave(p, filename = 'VBMvsAgeTail.pdf', height = 4.2, width = 4)
+```
+
+
+
+```{r}
+
+head(npdr.qtrait.results[npdr.qtrait.results$pval.adj<.05,], 10) # pval.adj, first column
+nrow(npdr.qtrait.results[npdr.qtrait.results$pval.adj<.05,])
+hist(npdr.qtrait.results[, 'pval.adj'])
+hist(npdr.qtrait.results[, 'pval.att'])
+# plot(npdr.qtrait.results[, 'pval.adj'], npdr.qtrait.results[, 'pval.attr'])
+
+# attributes with glmSTIR raw/nominal p-value less than .05
+#rownames(npdr.qtrait.results)[npdr.qtrait.results$pval.attr<.05] # pval.attr, second column
+
+# functional attribute detection stats
+npdr.qtrait.positives <- row.names(npdr.qtrait.results[npdr.qtrait.results$pval.adj<.05,]) # p.adj<.05
+# npdr.qtrait.detect.stats <- detectionStats(healthy.dat, npdr.qtrait.positives)
+# cat(npdr.qtrait.detect.stats$report)
+
+```
+
+
+
+```{r}
+# fixed k with theoretical surf value
+library(CORElearn)
+core.learn.qtrait <- CORElearn::attrEval("age", data = healthy.dat,
+                                      estimator = "RReliefFequalK",
+                                      costMatrix = NULL,
+                                      outputNumericSplits=FALSE,
+                                      kNearestEqual = knnSURF(n.samples.qtrait,.5))
+core.learn.qtrait.order <- order(core.learn.qtrait, decreasing = T)
+t(t(core.learn.qtrait[core.learn.qtrait.order[1:20]]))
+
+arbitrary_threshold = .005
+t(t(core.learn.qtrait[core.learn.qtrait>arbitrary_threshold]))
+
+# functional attribute detection stats
+#core.learn.qtrait.detect <- detectionStats(functional.qtrait, 
+#                                          names(core.learn.qtrait)[core.learn.qtrait.order[1:20]])
+core.learn.qtrait.detect <- detectionStats(functional.qtrait, 
+                                           names(core.learn.qtrait)[core.learn.qtrait>arbitrary_threshold])
+cat(core.learn.qtrait.detect$report)
+
+### Compare corelearn and glmSTIR
+corelearn.df <- data.frame(vars=names(core.learn.qtrait),rrelief=core.learn.qtrait)
+glmstir.beta.df <- data.frame(vars=rownames(glm.stir.qtrait.results),glmstir.beta=(glm.stir.qtrait.results$beta.attr))
+
+corelearn.cutoff <- arbitrary_threshold
+glmstir.pcutoff <- (glm.stir.qtrait.results$beta.attr[which(glm.stir.qtrait.results$pval.adj>.05)[1]-1])
+
+library(ggplot2)
+test.df <- merge(corelearn.df,glmstir.beta.df)
+functional <- factor(c(rep("Func",length(functional.qtrait)),rep("Non-Func",n.variables-length(functional.qtrait))))
+p <- ggplot(test.df, aes(x=rrelief,y=glmstir.beta)) + 
+  geom_smooth(method = "lm", se = F, color = "grey") + 
+  geom_point(aes(colour = functional), alpha = 0.5, size = 2) +
+  theme_bw() + theme(legend.position = c(0.8, 0.5)) +
+  labs(colour = NULL, x = "RRelief Scores", y = "NPDR Coefficients",
+       title = "Similarity between NPDR and RRelief") + 
+  # theme(text = element_text(size = 20)) +
+  #geom_vline(xintercept=stir.pcutoff, linetype="dashed") +
+  geom_hline(yintercept=glmstir.pcutoff, linetype="dashed", alpha = 0.5)
+
+p
+# ggsave(p, filename = "NPDRvsRRelief.pdf", height = 4, width = 4)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Tuning SVM with the caret package:
+Takes ~ 30 minutes. Model saved as fit.svm.para.Rdata.
+
+```{r echo = F}
+# parallel:::detectCores() # check number of cores: 16 wow
+# ctrl.svm.para <- trainControl(method="repeatedcv",
+#                      number=10,                        # 10-fold CV
+#                      repeats=5,                        # repeat 5 times
+# # adaptive=list(min=5,              # minimum number of resamples that will be used for each tuning parameter
+# #               alpha=0.05,         # confidence level that is used to remove parameter settings.
+# #               method='gls',       # 'gls' for linear models & 'BT' for Bradley-Terry model.
+# #               complete=T),
+#                      selectionFunction = 'oneSE',
+#                      search='random',
+#                      allowParallel = T)
+# # set.seed(1234) # set the same random number
+# caret.dat <- merge(X.healthy, Y.healthy, by = "id")
+# 
+# library(doParallel)
+# cl = 2
+# registerDoParallel(cl)
+# set.seed(1234) # set the same random number
+# system.time(
+#   fit.svm.para <- train(age ~ ., data=caret.dat[, colnames(caret.dat)!= "id"], method = "svmRadial",
+#                   trControl=ctrl.svm.para, preProc=c("center", "scale"), tuneLength=15)
+# ) # ~ 30 mins
+# # stopCluster(cl)
+# registerDoSEQ()
+# fit.svm.para
+# # The final values used for the model were sigma = 8.914568e-05 and C = 3.646512.
+# 
+# save(fit.svm.para, file = paste0(today, "fitSVMpara.Rdata"))
+# fit.svm.para$bestTune
+```
+
+
+```{r}
+# retrain on the whole data, earlier just for validation:
+# load("fitSVM.Rdata")
+# load(paste0(today, "fitSVMpara.Rdata"))
+# load("2017-08-24fitSVMpara.Rdata")
+
+load("2017-10-18fitSVMpara.Rdata")
+
+# varimp.svm <- varImp(fit.svm.para, scale=F)
+# # varimp.svm
+# head(varimp.svm$importance)
+# sorted.varImp <- varimp.svm$importance
+# sorted.varImp <- sorted.varImp[order(sorted.varImp$Overall, decreasing = T), , drop = F]
+# write.csv(sorted.varImp, file = "sortedVarImp.csv")
+```
+
+
+Now, use the best parameters to get CV predicted age on the healthy controls:
+
+```{r echo = F}
+all_predictions <- NULL
+for (i in 1:nfolds){
+  test_idx <- ((i - 1) * fold_size + 1):(fold_size * i + (nrow(Y.noid)%%5)*(i==nfolds))
+  test_y <- Y.noid[test_idx,]
+  test_x <- X.noid[test_idx, ]
+  train_y <- as.matrix(Y.noid[-test_idx,, drop = F])
+  train_x <- as.matrix(X.noid[-test_idx,])
+  model <- ksvm(train_x, train_y, scaled = TRUE, type = NULL, kernel ="rbfdot", 
+                kpar = list(sigma = fit.svm.para$bestTune$sigma), C = fit.svm.para$bestTune$C,
+                nu = 0.2, epsilon = 0.1, prob.model = FALSE,
+                class.weights = NULL, cross = 0, fit = TRUE, cache = 40,
+                tol = 0.001, shrinking = TRUE)
+  predicted_y <- predict(model, test_x)
+  all_predictions <- rbind(all_predictions, data.frame(test_y, predicted_y, X.healthy[test_idx, 'id']))
+}
+
+proc.time() - ptm
+names(all_predictions)[3] <- 'id'
+
+# sum(fa.vbm$frage_freesurfer_coarsevbm_n4_42_n66)
+rownames(all_predictions) <- all_predictions$id
+setdiff(rownames(all_predictions) , rownames(coarse.vol.filtered))
+merged_data0 <- merge(all_predictions, coarse.vol.filtered, by = "row.names")
+merged_data0 <- mutate(merged_data0, error = predicted_y - test_y)
+
+ss_resid <- mean(merged_data0$error^2)
+ss_total <- mean((merged_data0$test_y - mean(merged_data0$test_y))^2)
+r2 <- 1 - (ss_resid / ss_total)
+
+mae <- mean(abs(merged_data0$error))
+r <- cor(merged_data0$test_y, merged_data0$predicted_y)
+
+main = paste('5-fold Cross Validated Age Prediction\nR^2=', round(r2, 2), ', r = ', round(r, 2), ', MAE=', round(mae, 2), sep = '')
+
+plot(merged_data0$test_y, merged_data0$predicted_y, xlab = 'Age', ylab = 'Predicted Age', main = main, asp = 1)
+abline(0,1,col = 'red')
+# ggplot(data = allT500predictions, aes(x = test_y, y = predicted_y, colour = id)) + geom_line() +geom_point() + geom_abline(slope = 1)
+
+p <- ggplot(data = merged_data0, aes(x = test_y, y = predicted_y)) + # geom_line() +
+  geom_point() + geom_abline(slope = 1) + theme_bw() + 
+  theme(legend.position = "right", plot.title = element_text(hjust = 0.5)) +# scale_colour_grey(start = 0.2, end = 0.8, na.value = "red") + guides(col=guide_legend(ncol=2))+
+  labs(x = "Chronological Age", y = "Brain-Predicted Age", title = "Plot of brain-predicted age vs. chronological age
+of subjects in the training dataset")
+
+pdf("trainingBrainAGE.pdf", height = 4, width = 5.5)
+p
+dev.off()
+# p
+# trainpred <- predict.train(fit.svm.para)
+# plot(all_predictions$test_y, trainpred)
+  
+q <- ggplot(data = merged_data0, aes(x = test_y, y = error)) + # geom_line() +
+  geom_point() + theme_bw() + 
+  geom_smooth(method = "lm") +
+  theme(legend.position = "right", plot.title = element_text(hjust = 0.5)) +# scale_colour_grey(start = 0.2, end = 0.8, na.value = "red") + guides(col=guide_legend(ncol=2))+
+  labs(x = "Chronological Age", y = "BrainAGE", title = "Plot of BrainAGE vs. chronological age
+of subjects in the training dataset")
+
+pdf("trainingResAGE.pdf", height = 4, width = 5.5)
+q
+dev.off()
+```
+
+```{r}
+q
+```
+
+```{r}
+str(combined_data)
+
+```
+
+
+```{r}
+# merged_data1 <- merged_data0[, c(1:4, ncol(merged_data0))]
+# scanningParas <- read.csv("brainage/allscans_parameters_complete (1).csv", stringsAsFactors = F)
+# scanningParas <- scanningParas[!duplicated(scanningParas),]
+# # unique(scanningParas$tr_te_fov_matrix_xydim_thickness_flip_coil)
+# healthyVisits <- combined_data[healthy.scanned, "visit"]
+# healthyScanningParas <- scanningParas[scanningParas$visit %in% healthyVisits, ]
+# merged_data2 <- merge(merged_data1, healthyScanningParas, by.x = "Row.names", by.y = "subject")
+# write.csv(merged_data2, "trainingResultsParas.csv")
+
+```
+
