@@ -2,3 +2,9 @@
 .Rhistory
 .RData
 .Ruserdata
+.DS_Store
+hanli/
+idpsAllScans.Rdata
+idpsR01.Rdata
+T1000_redcap_wide-2017-03-18.csv
+Demographic_symptom.csv
