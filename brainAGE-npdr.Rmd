@@ -116,7 +116,7 @@ scanDates$visitDate <- anydate(as.numeric(scanDates$visit))
 # scanDates[is.na(scanDates$visitDate),]
 scanDates$DOB <- as.Date(scanDates$DOB, format = "%m/%d/%Y")
 scanDates$age <- (scanDates$visitDate - scanDates$DOB)/365
-write.csv(scanDates, file = "ages6000.csv")
+# write.csv(scanDates, file = "ages6000.csv")
 
 non.na.cols <- colSums(navalues) < nrow(myidps)
 idps.onescan <- myidps[!duplicated(myidps$id),]
@@ -259,7 +259,7 @@ my.variables <- colnames(coarse.vol.filtered[, -(1:2)])
 coarse.vol <- coarse.vol.filtered
 all.my.variables <- c("id", "visit", my.variables)
 myidps <- myidps[ , all.my.variables]
-write.csv(my.variables, file = "filteredPredictors.csv")
+# write.csv(my.variables, file = "filteredPredictors.csv")
 # coarse.vol.filtered <- fa.vbm
 ```
 
