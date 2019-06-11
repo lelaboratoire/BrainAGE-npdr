@@ -400,7 +400,7 @@ p <- ggplot(healthy.dat.plot, aes(x = age, y = density)) +
         panel.spacing.x = unit(0, "lines"),
         strip.text = element_text(size = rel(0.7), margin = margin(0.5,0,0.5,0, "mm")))
 p
-ggsave(p, filename = 'VBMvsAge.pdf', height = 3, width = 3)
+ggsave(p, filename = 'VBMvsAge.pdf', height = 3.5, width = 3.5)
 ```
 
 ```{r}
