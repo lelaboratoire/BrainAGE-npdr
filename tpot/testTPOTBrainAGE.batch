@@ -1,0 +1,14 @@
+#!/bin/bash
+#BSUB -J train_BrainAGE
+#BSUB -o /home/ttle/tpotBrainAGE/log/tpot_BrainAGE.log
+#BSUB -e /home/ttle/tpotBrainAGE/log/tpot_BrainAGE.err
+#BSUB -q moore_long
+#BSUB -M 60000
+#BSUB -R "span[hosts=1]"
+#BSUB -n 8
+
+#export PATH="/home/ttle/anaconda/bin:$PATH"
+cd /home/ttle/tpotBrainAGE
+
+source activate datasetSelector
+python trainBrainAGE.py
